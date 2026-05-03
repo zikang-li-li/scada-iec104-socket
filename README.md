@@ -1,115 +1,291 @@
-# 电力数据采集与监控系统 SCADA
+# 电力 SCADA IEC104 多子站通信调试与仿真系统
 
-技术栈：C++17 + IEC60870-5-104 + TCP Socket。
+## 项目概述
 
-本项目面向电网调度自动化场景，模拟主站前置采集程序通过调度数据网接入子站远动装置，完成遥测、遥信、状态监控、告警和本地缓存。工程重点不是简单“收发 socket”，而是按远动系统现场联调思路处理 IEC60870-5-104 链路建立、帧确认、超时、掉线、数据质量和测点异常。
+本项目是一个基于 C++17 和 TCP Socket 实现的 IEC60870-5-104 通信调试与仿真系统，面向电力调度自动化、变电站远动接入、配网通信联调和数据网故障排查场景。
 
-## 项目定位
+系统模拟主站前置采集程序与多个 RTU / 远动装置之间的 IEC104 通信过程，支持多设备接入、遥测遥信处理、链路心跳、断线重连、模拟子站、协议探测、数据缓存和工程日志输出。项目重点不在算法复杂度，而在贴近电力现场通信系统的可靠性、可观测性和联调排障能力。
 
-- 主站/子站架构：`scada_client` 作为主站侧前置采集服务，`iec104_mock_server` 模拟子站 RTU/远动通信装置。
-- 调度数据网通信：基于 TCP 2404 端口接入，配置中可切换子站 IP、端口、连接超时、接收超时和重连周期。
-- 远动系统模型：按 IOA 建立测点表，支持遥测、遥信、阈值告警、数据质量告警和无刷新告警。
-- 现场联调口径：通过模拟子站主动断链、遥测越限、遥信变位和缓存回写，验证主站侧链路稳定性与异常恢复能力。
+## 业务背景
 
-## 核心功能
+在电力 SCADA / 调度自动化系统中，主站通常通过调度数据网接入多个子站 RTU、测控装置或通信管理机。现场联调中经常遇到以下问题：
 
-- IEC60870-5-104 客户端：支持 STARTDT 启动流程、I 帧接收、S 帧确认、U 帧控制响应。
-- 遥测/遥信解析：支持 `M_ME_NC_1` 短浮点遥测、`M_ME_NB_1` 标度遥测、`M_SP_NA_1` 单点遥信。
-- 数据采集：将 IOA 映射为测点，输出实时测量值、单位、质量位和采集时间。
-- 状态监控：按测点 `stale_seconds` 检查数据新鲜度，发现长时间无刷新自动触发告警。
-- 告警功能：支持高高限、高限、低限、低低限、遥信异常、质量异常、数据超时。
-- 通信稳定性：链路断开后按 `reconnect_ms` 自动重连，接收超时后主动释放旧连接，避免半开连接长期占用。
-- 数据缓存：测量和告警写入 `data/cache.log`，网络异常时本地缓存继续可用，并按最大记录数裁剪。
-- 本地模拟：模拟子站周期发送数据，并定时断开连接，用于复现现场调试中的掉线、重连和告警恢复过程。
+- 子站 IP、端口、路由、防火墙或安全隔离配置异常，导致 TCP/2404 不通。
+- TCP 已连接，但 IEC104 `STARTDT` 启动流程未完成，主站收不到业务数据。
+- 点表 IOA、公共地址、遥测遥信类型与主站模型不一致。
+- 链路闪断、光纤收发器重启、交换机抖动导致采集间歇中断。
+- 子站长时间不上送数据，但 TCP 连接未立即断开。
+- 遥测越限、遥信变位、质量位异常需要被准确记录和追溯。
 
-## 协议解析细节
+本项目围绕这些现场问题设计，用于搭建本地可复现的电力通信调试环境。
 
-IEC104 APDU 以 `0x68` 起始，第二字节为长度，后 4 字节为 APCI 控制域，后续为 ASDU。项目中对帧长度、起始字节、控制域格式和 ASDU 类型做了基础校验。
+## 系统能力
 
-- U 帧：用于链路控制，主站发 `STARTDT act`，子站回 `STARTDT con` 后才进入数据传输状态；收到 `TESTFR act` 时回复 `TESTFR con`。
-- I 帧：用于承载 ASDU 数据，解析发送序号和接收序号，提取 TypeID、VSQ、COT、公共地址、IOA 和信息体。
-- S 帧：用于确认已接收的 I 帧，主站按收到的 I 帧发送序号递增后回 S 帧确认。
-- 遥测解析：`M_ME_NC_1` 按 IEEE754 小端浮点解析，`M_ME_NB_1` 按 16 位标度值解析，并读取 QDS 质量描述。
-- 遥信解析：`M_SP_NA_1` 解析 SIQ 的状态位、无效位、非当前位、取代位和闭锁位，避免把遥信 bit0 误判为 QDS 溢出位。
+### IEC104 主站采集
 
-对应实现位于 [src/iec104/Iec104Frame.cpp](<C:/Users/zikang li/Documents/Codex/2026-05-02/scada-c-iec104-socket/src/iec104/Iec104Frame.cpp>) 和 [src/iec104/Iec104Client.cpp](<C:/Users/zikang li/Documents/Codex/2026-05-02/scada-c-iec104-socket/src/iec104/Iec104Client.cpp>)。
+- 支持 IEC104 TCP 客户端连接，默认端口 `2404`。
+- 支持 `STARTDT act/con` 启动流程。
+- 支持 I 帧接收、S 帧确认和 U 帧控制响应。
+- 支持 `TESTFR act/con` 心跳检测。
+- 支持链路断开后的自动重连，重连周期可配置。
+- 支持多 RTU / 多子站并发接入，每个设备独立连接、独立心跳、独立重连。
 
-## 异常处理
+### 远动数据处理
 
-- 掉线：`recv` 返回 0、发送失败或模拟子站主动断开时，主站关闭当前 socket，记录链路离线，并按配置周期重连。
-- 超时：连接阶段受 `connect_timeout_ms` 控制，接收 APDU 受 `receive_timeout_ms` 控制，超时后按链路异常处理。
-- 数据错乱：接收端持续寻找 `0x68` 起始字节，并校验 APDU 长度；长度非法、帧格式异常或数据不完整时丢弃当前连接，防止错位解析继续扩散。
-- 协议不支持：未知 TypeID 不进入测点表，避免把未识别 ASDU 写成错误遥测。
-- 质量异常：IEC104 质量位出现 invalid、blocked 等状态时触发数据质量告警。
-- 测点无刷新：超过测点配置的 `stale_seconds` 后触发 stale 告警，恢复接收后自动清除。
+- 区分遥测、遥信、遥控业务类型。
+- 遥测支持短浮点值 `M_ME_NC_1`、标度值 `M_ME_NB_1`。
+- 遥信支持单点信息 `M_SP_NA_1`。
+- 支持按设备名输出业务日志，例如：
 
-## 现场联调经验模拟
+```text
+[INFO] Telemetry [110kV East Substation RTU] 110kV bus voltage=222.01 kV IOA=1002 quality=good
+[INFO] Telesignal [110kV East Substation RTU] 110kV breaker QF1=CLOSED IOA=2001 quality=good
+```
 
-本地模拟服务端按子站远动装置的行为设计：先等待主站发起 STARTDT，再周期上送遥测和遥信，并可通过 `--drop-every-sec` 主动制造调度数据网闪断。联调时可观察主站侧是否完成重连、是否重复确认 I 帧、遥测越限是否触发告警、遥信变位是否能恢复，以及缓存文件是否持续落盘。
+### 通信稳定性设计
 
-这类流程对应现场常见问题：子站 IP/端口配置不一致、链路能 ping 通但 2404 不通、STARTDT 未确认导致无数据、主站长时间未收到变化数据、远动点表 IOA 与主站模型不一致、质量位异常导致数据可信度下降。
+- 自动检测连接失败、接收失败、发送确认失败和心跳超时。
+- 链路异常后主动关闭旧 socket，进入定时重连流程。
+- 心跳机制采用 IEC104 标准 `TESTFR act/con`。
+- 多设备模式下，单个 RTU 掉线不影响其他 RTU 正常采集。
 
-## 工程成果
+### 模拟子站
 
-- 在模拟主站/子站联调环境中完成 IEC60870-5-104 链路建立、遥测遥信采集、告警触发/恢复、主动断链和自动重连验证。
-- 按 2,000 点测点规模设计测点映射与本地缓存结构，缓存默认保留 10,000 条测量/告警记录，可按现场容量调整。
-- 采集周期按 1 秒级设计，模拟环境下单批遥测遥信从子站发送到主站解析入缓存为毫秒级处理链路。
-- 通信可靠性侧重点为“故障可恢复”：掉线后按 2 秒默认周期重连，链路恢复后继续采集，不要求人工重启主站进程。
-- 告警链路覆盖越限、遥信异常、质量异常和无刷新，适合支撑调度主站侧的运行监视与问题追溯。
+项目内置 `iec104_mock_server`，用于模拟现场 RTU / 远动装置：
 
-## 构建
+- 周期性上送遥测、遥信。
+- 支持越限数据模拟。
+- 支持质量位异常模拟。
+- 支持遥信分合变位模拟。
+- 支持 TCP 保持但停止上送数据，用于验证心跳和无刷新告警。
+- 支持主动断链，用于验证主站重连能力。
+
+### 协议探测与排障
+
+`iec104_probe` 可用于快速判断 IEC104 站端通信状态：
+
+- TCP/2404 是否可连接。
+- `STARTDT` 是否确认。
+- I/S/U 帧是否正常。
+- TypeID、COT、公共地址、IOA 是否符合点表。
+- 遥测遥信质量位是否异常。
+- 可输出十六进制 APDU，便于与抓包结果对照。
+
+### 数据缓存与日志
+
+- 支持线程安全的内存最新值缓存。
+- 支持本地文件缓存测量值、业务记录和告警事件。
+- 支持工程日志输出到控制台和文件。
+- 支持 `INFO`、`WARN`、`ERROR`、`DEBUG` 日志等级。
+- 日志带毫秒级时间戳，便于排查链路抖动和数据刷新时间。
+
+## 程序组成
+
+| 程序 | 说明 |
+| --- | --- |
+| `scada_client` | 主站侧 IEC104 采集程序，读取多设备配置并建立多条 IEC104 链路 |
+| `iec104_mock_server` | 模拟 RTU / 子站远动装置，用于联调和故障注入 |
+| `iec104_probe` | IEC104 链路探测工具，用于快速排查 IP、端口、STARTDT、IOA 和质量位 |
+| `scada_cache_report` | 本地缓存报告工具，用于查看最新测点和当前未恢复告警 |
+| `scada_selftest` | 协议解析、配置解析、日志和缓存基础自测 |
+
+## 主要模块
+
+```text
+include/scada/common   配置解析与工程日志
+include/scada/net      跨平台 TCP Socket 封装
+include/scada/iec104   IEC104 APDU 构造、解析、客户端链路
+include/scada/scada    测点模型、业务数据、告警、缓存、主站调度
+include/scada/mock     IEC104 模拟子站
+src/tools              协议探测和缓存报告工具
+config                 多 RTU 示例配置
+docs                   现场调试说明
+tests                  自测入口
+```
+
+## 支持的现场场景
+
+### 多子站接入
+
+主站从 `config/scada.conf` 读取多个 `device`，每个设备拥有独立 IP、端口、公共地址、心跳参数、重连参数和点表。
+
+适用场景：
+
+- 多个变电站 RTU 接入同一主站前置。
+- 多台通信管理机并行调试。
+- 同一个 IOA 在不同站点复用，但业务上需要按设备区分。
+
+### 链路稳定性验证
+
+适用场景：
+
+- 调度数据网链路抖动。
+- 子站重启导致 TCP 断开。
+- TCP 半开连接导致业务数据长时间不上送。
+- 主站需要自动恢复采集，不依赖人工重启程序。
+
+### 点表与协议排障
+
+适用场景：
+
+- 核对现场远动点表 IOA。
+- 判断 TypeID 是否符合遥测/遥信定义。
+- 判断公共地址是否配置一致。
+- 对照抓包分析 IEC104 APDU。
+- 快速定位“网络通但主站无数据”的问题。
+
+### 告警与数据追溯
+
+适用场景：
+
+- 遥测越限。
+- 遥信异常变位。
+- 数据质量位 invalid / not topical / blocked。
+- 测点长时间无刷新。
+- 事后通过缓存文件和日志追溯故障时间线。
+
+## 构建方式
 
 ```powershell
 cmake -S . -B build-make -G "MinGW Makefiles"
 cmake --build build-make
 ```
 
-## 自测
+## 运行示例
+
+启动两个模拟子站：
 
 ```powershell
-.\build-make\scada_selftest.exe
+.\build-make\iec104_mock_server.exe --port 2404 --scenario mixed --interval-ms 1000 --drop-every-sec 20
 ```
-
-## 本地演示
-
-打开两个终端。
-
-终端 1：启动 IEC104 模拟服务端。
 
 ```powershell
-.\build-make\iec104_mock_server.exe --port 2404 --interval-ms 1000 --drop-every-sec 20
+.\build-make\iec104_mock_server.exe --port 2405 --scenario quality --interval-ms 1000 --drop-every-sec 0
 ```
 
-终端 2：启动 SCADA 客户端。
+启动主站采集：
 
 ```powershell
 .\build-make\scada_client.exe --config config\scada.conf
 ```
 
-运行时可以看到采集值、告警触发/恢复、服务端模拟断线后的客户端自动重连，以及本地缓存文件 `data/cache.log` 的持续写入。
+开启协议调试日志：
 
-## 配置说明
+```powershell
+.\build-make\scada_client.exe --config config\scada.conf --debug
+```
 
-配置文件位于 `config/scada.conf`，采用 `key=value` 格式。
+探测单个子站：
 
-- `host` / `port`：IEC104 服务端地址。
-- `connect_timeout_ms`：TCP 连接超时。
-- `receive_timeout_ms`：接收 APDU 超时。
-- `reconnect_ms`：断线后的重连间隔。
-- `status_interval_ms`：状态监控扫描周期。
-- `cache_path`：本地缓存文件。
-- `cache_max_records`：缓存最多保留记录数。
-- `point.<ioa>.*`：测点名称、类型、单位、阈值、正常遥信状态和超时窗口。
+```powershell
+.\build-make\iec104_probe.exe --host 127.0.0.1 --port 2404 --seconds 8 --hex
+```
 
-## 目录结构
+查看缓存报告：
+
+```powershell
+.\build-make\scada_cache_report.exe --cache data\cache.log
+```
+
+## 多设备配置示例
+
+`config/scada.conf` 使用 `key=value` 格式，适合现场快速修改：
+
+```ini
+status_interval_ms=1000
+cache_path=data/cache.log
+cache_max_records=10000
+log_path=logs/scada_client.log
+log_level=info
+log_console=true
+log_append=true
+
+device.rtu_110kv.name=110kV East Substation RTU
+device.rtu_110kv.enabled=true
+device.rtu_110kv.host=127.0.0.1
+device.rtu_110kv.port=2404
+device.rtu_110kv.common_address=1
+device.rtu_110kv.connect_timeout_ms=3000
+device.rtu_110kv.receive_timeout_ms=5000
+device.rtu_110kv.reconnect_ms=3000
+device.rtu_110kv.heartbeat_interval_ms=10000
+device.rtu_110kv.heartbeat_timeout_ms=3000
+
+device.rtu_110kv.point.1001.name=110kV main transformer load
+device.rtu_110kv.point.1001.type=analog
+device.rtu_110kv.point.1001.unit=MW
+device.rtu_110kv.point.1001.high_high=95
+device.rtu_110kv.point.1001.high=85
+device.rtu_110kv.point.1001.stale_seconds=15
+
+device.rtu_110kv.point.2001.name=110kV breaker QF1
+device.rtu_110kv.point.2001.type=digital
+device.rtu_110kv.point.2001.normal_state=1
+device.rtu_110kv.point.2001.stale_seconds=20
+
+device.rtu_west.name=110kV West Substation RTU
+device.rtu_west.enabled=true
+device.rtu_west.host=127.0.0.1
+device.rtu_west.port=2405
+device.rtu_west.common_address=1
+device.rtu_west.reconnect_ms=3000
+device.rtu_west.heartbeat_interval_ms=10000
+device.rtu_west.heartbeat_timeout_ms=3000
+
+device.rtu_west.point.1001.name=West transformer load
+device.rtu_west.point.1001.type=analog
+device.rtu_west.point.1001.unit=MW
+```
+
+## 模拟故障场景
+
+```powershell
+# 正常遥测遥信上送
+.\build-make\iec104_mock_server.exe --scenario normal
+
+# 遥测越限
+.\build-make\iec104_mock_server.exe --scenario alarm
+
+# 质量位异常
+.\build-make\iec104_mock_server.exe --scenario quality --quality-every 3
+
+# 遥信分合变化
+.\build-make\iec104_mock_server.exe --scenario digital-trip
+
+# TCP 不断开，但停止上送遥测，用于验证心跳和无刷新告警
+.\build-make\iec104_mock_server.exe --scenario stale --quiet-after-sec 8 --drop-every-sec 0
+
+# 主动断链，用于验证主站自动重连
+.\build-make\iec104_mock_server.exe --scenario mixed --drop-every-sec 20
+```
+
+## 典型日志
 
 ```text
-include/scada/common   配置和日志
-include/scada/net      Socket 兼容层和 TCP 客户端
-include/scada/iec104   IEC104 帧构造、解析和客户端循环
-include/scada/scada    测点、告警、缓存和 SCADA 主流程
-include/scada/mock     IEC104 模拟服务端
-src                    实现文件
-tests                  自测入口
-config                 示例配置
+[2026-05-03 21:26:39.102] [INFO] IEC104 TCP connected: 127.0.0.1:2404
+[2026-05-03 21:26:39.105] [INFO] IEC104 data transfer started: 127.0.0.1:2404
+[2026-05-03 21:26:39.218] [INFO] Telemetry [110kV East Substation RTU] 110kV bus voltage=222.01 kV IOA=1002 quality=good
+[2026-05-03 21:26:39.220] [INFO] Telesignal [110kV East Substation RTU] 110kV breaker QF1=CLOSED IOA=2001 quality=good
+[2026-05-03 21:26:43.001] [INFO] IEC104 heartbeat TX: 127.0.0.1:2404
+[2026-05-03 21:26:43.005] [INFO] IEC104 heartbeat OK: 127.0.0.1:2404
+[2026-05-03 21:26:49.983] [WARN] IEC104 connect failed: 127.0.0.1:2405; reconnecting in 3000 ms
 ```
+
+## 工程特点
+
+- 使用 C++17 实现，核心逻辑不依赖大型第三方框架。
+- 网络层、协议层、业务层、模拟层职责分离。
+- 多 RTU 接入按设备隔离，便于扩展真实站点配置。
+- 心跳、重连、日志、缓存和告警均围绕现场稳定性设计。
+- 工具链覆盖采集、模拟、探测、排障和报告，适合作为电力通信岗位项目展示。
+
+## 岗位匹配点
+
+该项目适合用于展示以下能力：
+
+- 理解电力 SCADA 主站与子站通信链路。
+- 熟悉 IEC60870-5-104 基本帧格式和启动流程。
+- 能处理 TCP 通信异常、心跳检测和断线重连。
+- 能按点表模型处理遥测、遥信、质量位和告警。
+- 能设计简单可靠的工程日志和本地缓存。
+- 能构建可复现的现场联调、仿真和排障工具。

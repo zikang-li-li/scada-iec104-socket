@@ -16,7 +16,9 @@ struct Iec104ClientOptions {
     std::uint16_t port = 2404;
     int connectTimeoutMs = 3000;
     int receiveTimeoutMs = 5000;
-    int reconnectMs = 2000;
+    int reconnectMs = 3000;
+    int heartbeatIntervalMs = 10000;
+    int heartbeatTimeoutMs = 3000;
 };
 
 class Iec104Client {
@@ -41,6 +43,8 @@ private:
     void run();
     bool performStartDt(scada::net::TcpClient& client);
     bool readApdu(scada::net::TcpClient& client, std::vector<std::uint8_t>& frame);
+    bool sendHeartbeat(scada::net::TcpClient& client);
+    void sleepBeforeReconnect(const std::string& reason);
     void notifyConnection(bool connected);
 
     Iec104ClientOptions options_;
@@ -53,4 +57,3 @@ private:
 };
 
 } // namespace scada::iec104
-

@@ -10,6 +10,14 @@ enum class PointType {
     Analog,
     Digital,
     Counter,
+    Control,
+    Unknown
+};
+
+enum class BusinessDataType {
+    Telemetry,
+    Telesignal,
+    Telecontrol,
     Unknown
 };
 
@@ -22,6 +30,8 @@ struct DataQuality {
 };
 
 struct DataPointSnapshot {
+    std::string deviceId;
+    std::string deviceName;
     int address = 0;
     std::string name;
     PointType type = PointType::Unknown;
@@ -33,6 +43,12 @@ struct DataPointSnapshot {
     std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now();
 };
 
+struct BusinessDataRecord {
+    BusinessDataType businessType = BusinessDataType::Unknown;
+    DataPointSnapshot snapshot;
+    std::string displayValue;
+};
+
 enum class AlarmSeverity {
     Info,
     Warning,
@@ -40,6 +56,8 @@ enum class AlarmSeverity {
 };
 
 struct AlarmEvent {
+    std::string deviceId;
+    std::string deviceName;
     int address = 0;
     std::string pointName;
     std::string rule;
@@ -52,8 +70,9 @@ struct AlarmEvent {
 
 PointType pointTypeFromString(const std::string& value);
 std::string pointTypeName(PointType type);
+BusinessDataType businessTypeFromPointType(PointType type);
+std::string businessTypeName(BusinessDataType type);
 std::string severityName(AlarmSeverity severity);
 std::string qualityText(const DataQuality& quality);
 
 } // namespace scada::model
-

@@ -44,6 +44,10 @@ bool ensureParentDirectory(const std::string& path) {
     return !error;
 }
 
+std::string cacheKey(const std::string& deviceId, int address) {
+    return deviceId + ":" + std::to_string(address);
+}
+
 } // namespace
 
 void DataCache::configure(std::string path, std::size_t maxRecords) {
@@ -54,9 +58,16 @@ void DataCache::configure(std::string path, std::size_t maxRecords) {
 }
 
 bool DataCache::appendMeasurement(const model::DataPointSnapshot& snapshot) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        latest_[cacheKey(snapshot.deviceId, snapshot.address)] = snapshot;
+    }
+
     std::ostringstream line;
     line << timestamp(snapshot.timestamp)
          << "|MEASURE"
+         << "|" << clean(snapshot.deviceId)
+         << "|" << clean(snapshot.deviceName)
          << "|" << snapshot.address
          << "|" << clean(snapshot.name)
          << "|" << model::pointTypeName(snapshot.type)
@@ -69,10 +80,38 @@ bool DataCache::appendMeasurement(const model::DataPointSnapshot& snapshot) {
     return appendLine(line.str());
 }
 
+bool DataCache::appendBusinessData(const model::BusinessDataRecord& record) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        latest_[cacheKey(record.snapshot.deviceId, record.snapshot.address)] = record.snapshot;
+        recentBusiness_.push_back(record);
+        if (recentBusiness_.size() > maxRecords_) {
+            const auto first = recentBusiness_.end() - static_cast<std::ptrdiff_t>(maxRecords_);
+            recentBusiness_.erase(recentBusiness_.begin(), first);
+        }
+    }
+
+    std::ostringstream line;
+    line << timestamp(record.snapshot.timestamp)
+         << "|BUSINESS"
+         << "|" << clean(record.snapshot.deviceId)
+         << "|" << clean(record.snapshot.deviceName)
+         << "|" << model::businessTypeName(record.businessType)
+         << "|" << record.snapshot.address
+         << "|" << clean(record.snapshot.name)
+         << "|" << clean(record.displayValue)
+         << "|" << clean(record.snapshot.unit)
+         << "|" << model::qualityText(record.snapshot.quality);
+
+    return appendLine(line.str());
+}
+
 bool DataCache::appendAlarm(const model::AlarmEvent& alarm) {
     std::ostringstream line;
     line << timestamp(alarm.timestamp)
          << "|ALARM"
+         << "|" << clean(alarm.deviceId)
+         << "|" << clean(alarm.deviceName)
          << "|" << alarm.address
          << "|" << clean(alarm.pointName)
          << "|" << clean(alarm.rule)
@@ -82,6 +121,29 @@ bool DataCache::appendAlarm(const model::AlarmEvent& alarm) {
          << "|" << clean(alarm.message);
 
     return appendLine(line.str());
+}
+
+std::optional<model::DataPointSnapshot> DataCache::latestMeasurement(
+    const std::string& deviceId,
+    int address) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = latest_.find(cacheKey(deviceId, address));
+    if (found == latest_.end()) {
+        return std::nullopt;
+    }
+    return found->second;
+}
+
+std::vector<model::BusinessDataRecord> DataCache::recentBusinessData(std::size_t limit) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (limit == 0 || recentBusiness_.empty()) {
+        return {};
+    }
+
+    const auto count = std::min(limit, recentBusiness_.size());
+    return std::vector<model::BusinessDataRecord>(
+        recentBusiness_.end() - static_cast<std::ptrdiff_t>(count),
+        recentBusiness_.end());
 }
 
 std::size_t DataCache::recordCount() const {

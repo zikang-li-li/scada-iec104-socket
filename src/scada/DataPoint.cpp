@@ -26,6 +26,9 @@ PointType pointTypeFromString(const std::string& value) {
     if (normalized == "counter") {
         return PointType::Counter;
     }
+    if (normalized == "control" || normalized == "telecontrol" || normalized == "remote_control") {
+        return PointType::Control;
+    }
     return PointType::Unknown;
 }
 
@@ -37,7 +40,38 @@ std::string pointTypeName(PointType type) {
         return "digital";
     case PointType::Counter:
         return "counter";
+    case PointType::Control:
+        return "control";
     case PointType::Unknown:
+        return "unknown";
+    }
+    return "unknown";
+}
+
+BusinessDataType businessTypeFromPointType(PointType type) {
+    switch (type) {
+    case PointType::Analog:
+    case PointType::Counter:
+        return BusinessDataType::Telemetry;
+    case PointType::Digital:
+        return BusinessDataType::Telesignal;
+    case PointType::Control:
+        return BusinessDataType::Telecontrol;
+    case PointType::Unknown:
+        return BusinessDataType::Unknown;
+    }
+    return BusinessDataType::Unknown;
+}
+
+std::string businessTypeName(BusinessDataType type) {
+    switch (type) {
+    case BusinessDataType::Telemetry:
+        return "telemetry";
+    case BusinessDataType::Telesignal:
+        return "telesignal";
+    case BusinessDataType::Telecontrol:
+        return "telecontrol";
+    case BusinessDataType::Unknown:
         return "unknown";
     }
     return "unknown";
@@ -87,4 +121,3 @@ std::string qualityText(const DataQuality& quality) {
 }
 
 } // namespace scada::model
-

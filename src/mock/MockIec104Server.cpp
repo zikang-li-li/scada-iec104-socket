@@ -3,9 +3,12 @@
 #include "scada/common/Logger.h"
 #include "scada/iec104/Iec104Frame.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <random>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -16,6 +19,17 @@
 
 namespace scada::mock {
 namespace {
+
+constexpr std::uint8_t QualityInvalid = 0x80;
+constexpr std::uint8_t QualityNotTopical = 0x40;
+constexpr std::uint8_t QualityBlocked = 0x10;
+
+std::string lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
 
 bool sendAll(scada::net::SocketHandle socket, const std::vector<std::uint8_t>& data, int timeoutMs) {
     std::size_t sent = 0;
@@ -73,6 +87,47 @@ bool readApdu(scada::net::SocketHandle socket, std::vector<std::uint8_t>& frame,
 }
 
 } // namespace
+
+MockScenario scenarioFromString(const std::string& value, MockScenario fallback) {
+    const auto normalized = lower(value);
+    if (normalized == "normal") {
+        return MockScenario::Normal;
+    }
+    if (normalized == "alarm") {
+        return MockScenario::Alarm;
+    }
+    if (normalized == "quality") {
+        return MockScenario::Quality;
+    }
+    if (normalized == "stale") {
+        return MockScenario::Stale;
+    }
+    if (normalized == "digital-trip" || normalized == "digital_trip") {
+        return MockScenario::DigitalTrip;
+    }
+    if (normalized == "mixed") {
+        return MockScenario::Mixed;
+    }
+    return fallback;
+}
+
+std::string scenarioName(MockScenario scenario) {
+    switch (scenario) {
+    case MockScenario::Normal:
+        return "normal";
+    case MockScenario::Alarm:
+        return "alarm";
+    case MockScenario::Quality:
+        return "quality";
+    case MockScenario::Stale:
+        return "stale";
+    case MockScenario::DigitalTrip:
+        return "digital-trip";
+    case MockScenario::Mixed:
+        return "mixed";
+    }
+    return "mixed";
+}
 
 MockIec104Server::MockIec104Server(MockServerOptions options)
     : options_(options) {}
@@ -132,7 +187,8 @@ void MockIec104Server::run() {
         return;
     }
 
-    common::Logger::info("Mock IEC104 server listening on 0.0.0.0:" + std::to_string(options_.port));
+    common::Logger::info("Mock IEC104 server listening on 0.0.0.0:" + std::to_string(options_.port) +
+                         ", scenario=" + scenarioName(options_.scenario));
 
     while (running_) {
         if (!net::waitReadable(listenSocket, 500)) {
@@ -174,6 +230,7 @@ void MockIec104Server::serveClient(net::SocketHandle client) {
     std::uniform_real_distribution<float> noise(-2.0F, 2.0F);
     std::uint16_t sendSequence = 0;
     int tick = 0;
+    bool quietAnnounced = false;
 
     const auto start = std::chrono::steady_clock::now();
     auto nextSend = start;
@@ -199,22 +256,68 @@ void MockIec104Server::serveClient(net::SocketHandle client) {
 
         if (now >= nextSend) {
             ++tick;
-            const float load = tick % 18 == 0 ? 98.0F : 74.0F + 12.0F * std::sin(tick * 0.35F) + noise(randomEngine);
-            const float voltage = tick % 23 == 0 ? 197.0F : 220.0F + 7.0F * std::sin(tick * 0.21F) + noise(randomEngine);
-            const bool breakerClosed = tick % 16 < 13;
+            const auto elapsedSeconds = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
+            const bool quiet = options_.scenario == MockScenario::Stale &&
+                               elapsedSeconds >= options_.quietAfterSeconds;
+            if (quiet) {
+                if (!quietAnnounced) {
+                    common::Logger::warn("Mock IEC104 server keeps TCP up but stops sending telemetry");
+                    quietAnnounced = true;
+                }
+                nextSend = now + std::chrono::milliseconds(options_.sendIntervalMs);
+                continue;
+            }
+
+            float load = 72.0F + 5.0F * std::sin(tick * 0.35F) + noise(randomEngine);
+            float voltage = 220.0F + 2.0F * std::sin(tick * 0.21F) + noise(randomEngine);
+            bool breakerClosed = true;
+            std::uint8_t loadQuality = 0;
+            std::uint8_t voltageQuality = 0;
+            std::uint8_t breakerQuality = 0;
+
+            if (options_.scenario == MockScenario::Alarm) {
+                load = tick % 2 == 0 ? 98.0F : 90.0F;
+                voltage = tick % 3 == 0 ? 197.0F : 236.0F;
+            } else if (options_.scenario == MockScenario::Quality) {
+                const bool bad = options_.qualityEvery > 0 && tick % options_.qualityEvery == 0;
+                loadQuality = bad ? QualityInvalid : 0;
+                voltageQuality = bad ? QualityNotTopical : 0;
+                breakerQuality = bad ? QualityBlocked : 0;
+            } else if (options_.scenario == MockScenario::DigitalTrip) {
+                breakerClosed = tick % 10 < 5;
+            } else if (options_.scenario == MockScenario::Mixed) {
+                load = tick % 18 == 0 ? 98.0F : 74.0F + 12.0F * std::sin(tick * 0.35F) + noise(randomEngine);
+                voltage = tick % 23 == 0 ? 197.0F : 220.0F + 7.0F * std::sin(tick * 0.21F) + noise(randomEngine);
+                breakerClosed = tick % 16 < 13;
+                if (options_.qualityEvery > 0 && tick % (options_.qualityEvery * 4) == 0) {
+                    loadQuality = QualityInvalid;
+                }
+            }
 
             const auto loadFrame = iec104::Iec104Frame::buildIFormat(
                 sendSequence++,
                 0,
-                iec104::Iec104Frame::buildFloatMeasurementAsdu(1, 1001, load));
+                iec104::Iec104Frame::buildFloatMeasurementAsdu(
+                    options_.commonAddress,
+                    options_.loadIoa,
+                    load,
+                    loadQuality));
             const auto voltageFrame = iec104::Iec104Frame::buildIFormat(
                 sendSequence++,
                 0,
-                iec104::Iec104Frame::buildFloatMeasurementAsdu(1, 1002, voltage));
+                iec104::Iec104Frame::buildFloatMeasurementAsdu(
+                    options_.commonAddress,
+                    options_.voltageIoa,
+                    voltage,
+                    voltageQuality));
             const auto breakerFrame = iec104::Iec104Frame::buildIFormat(
                 sendSequence++,
                 0,
-                iec104::Iec104Frame::buildSinglePointAsdu(1, 2001, breakerClosed));
+                iec104::Iec104Frame::buildSinglePointAsdu(
+                    options_.commonAddress,
+                    options_.breakerIoa,
+                    breakerClosed,
+                    breakerQuality));
 
             if (!sendAll(client, loadFrame, 1000) ||
                 !sendAll(client, voltageFrame, 1000) ||
@@ -230,4 +333,3 @@ void MockIec104Server::serveClient(net::SocketHandle client) {
 }
 
 } // namespace scada::mock
-

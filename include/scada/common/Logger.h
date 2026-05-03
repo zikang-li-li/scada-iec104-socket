@@ -1,5 +1,6 @@
 #pragma once
 
+#include <fstream>
 #include <mutex>
 #include <string>
 
@@ -15,6 +16,10 @@ enum class LogLevel {
 class Logger {
 public:
     static void setLevel(LogLevel level);
+    static LogLevel levelFromString(const std::string& value, LogLevel fallback = LogLevel::Info);
+    static void setConsoleEnabled(bool enabled);
+    static bool setOutputFile(const std::string& path, bool append = true);
+    static void closeOutputFile();
 
     static void debug(const std::string& message);
     static void info(const std::string& message);
@@ -28,7 +33,8 @@ private:
 
     static std::mutex mutex_;
     static LogLevel minLevel_;
+    static bool consoleEnabled_;
+    static std::ofstream file_;
 };
 
 } // namespace scada::common
-

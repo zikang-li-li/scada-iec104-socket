@@ -44,5 +44,10 @@ target_link_libraries(scada_client PRIVATE scada_core)
 add_executable(iec104_mock_server src/main_mock_server.cpp)
 target_link_libraries(iec104_mock_server PRIVATE scada_core)
 
+add_executable(iec104_probe src/tools/iec104_probe.cpp)
+target_link_libraries(iec104_probe PRIVATE scada_core)
+
+add_executable(scada_cache_report src/tools/scada_cache_report.cpp)
+
 add_executable(scada_selftest tests/iec104_frame_test.cpp)
 target_link_libraries(scada_selftest PRIVATE scada_core)

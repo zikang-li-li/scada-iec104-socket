@@ -18,13 +18,14 @@ void handleSignal(int) {
 }
 
 void printUsage(const char* program) {
-    std::cout << "Usage: " << program << " [--config config/scada.conf]\n";
+    std::cout << "Usage: " << program << " [--config config/scada.conf] [--debug]\n";
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
     std::string configPath = "config/scada.conf";
+    bool debug = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
@@ -36,6 +37,8 @@ int main(int argc, char** argv) {
             configPath = argv[++index];
         } else if (argument.rfind("--config=", 0) == 0) {
             configPath = argument.substr(9);
+        } else if (argument == "--debug") {
+            debug = true;
         }
     }
 
@@ -43,6 +46,19 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, handleSignal);
 
     const auto config = scada::common::Config::load(configPath);
+    scada::common::Logger::setConsoleEnabled(config.log.console);
+    scada::common::Logger::setLevel(scada::common::Logger::levelFromString(config.log.level));
+    if (debug) {
+        scada::common::Logger::setLevel(scada::common::LogLevel::Debug);
+    }
+    if (!config.log.path.empty()) {
+        if (scada::common::Logger::setOutputFile(config.log.path, config.log.append)) {
+            scada::common::Logger::info("Log file enabled: " + config.log.path);
+        } else {
+            scada::common::Logger::error("Failed to open log file: " + config.log.path);
+        }
+    }
+
     scada::scada::ScadaSystem system(config);
     system.start();
 
@@ -55,4 +71,3 @@ int main(int argc, char** argv) {
     system.stop();
     return 0;
 }
-
